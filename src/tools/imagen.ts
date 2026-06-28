@@ -34,7 +34,7 @@ const GenerateImageSchema = z.object({
   model: z.enum(MODELS).optional().default('nano-banana-2'),
   aspectRatio: z.enum(ASPECT_RATIOS).optional().default('1:1'),
   resolution: z.enum(RESOLUTIONS).optional().default('1K'),
-  saveTo: z.enum(SAVE_TARGETS).optional().default('drive'),
+  saveTo: z.enum(SAVE_TARGETS).optional().default('local'),
   fileName: z.string().optional(),
   driveFolderId: z.string().optional(),
   localPath: z.string().optional(),
@@ -47,7 +47,7 @@ const EditImageSchema = z.object({
   model: z.enum(MODELS).optional().default('nano-banana-2'),
   aspectRatio: z.enum(ASPECT_RATIOS).optional(),
   resolution: z.enum(RESOLUTIONS).optional().default('1K'),
-  saveTo: z.enum(SAVE_TARGETS).optional().default('drive'),
+  saveTo: z.enum(SAVE_TARGETS).optional().default('local'),
   fileName: z.string().optional(),
   driveFolderId: z.string().optional(),
   localPath: z.string().optional(),
@@ -85,20 +85,10 @@ function extToMime(filePath: string): string {
 }
 
 async function getAuthHeaders(authClient: any): Promise<{ headers: Record<string, string>; urlSuffix: string }> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (apiKey) {
-    return {
-      headers: { 'Content-Type': 'application/json' },
-      urlSuffix: `?key=${apiKey}`,
-    };
-  }
-
   const tokenRes = await authClient.getAccessToken();
   const token = tokenRes?.token || tokenRes?.res?.data?.access_token;
   if (!token) {
-    throw new Error(
-      'No Gemini API credentials available. Set GEMINI_API_KEY env var or re-authenticate (npm run auth) to grant the generative-language scope.',
-    );
+    throw new Error('Not authenticated. Run: npx images-mcp auth');
   }
 
   return {
@@ -271,7 +261,7 @@ export const toolDefinitions: ToolDefinition[] = [
         saveTo: {
           type: 'string',
           enum: [...SAVE_TARGETS],
-          description: 'Save to Google Drive or locally (default: drive)',
+          description: 'Save locally or to Google Drive (default: local). Drive requires OAuth setup.',
         },
         fileName: { type: 'string', description: 'Output file name (without extension, auto-generated if omitted)' },
         driveFolderId: {
@@ -280,7 +270,7 @@ export const toolDefinitions: ToolDefinition[] = [
         },
         localPath: {
           type: 'string',
-          description: 'Local directory to save to — used when saveTo=local',
+          description: 'Local directory to save to — used when saveTo=local (default: system temp dir)',
         },
       },
       required: ['prompt'],
@@ -289,13 +279,13 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     name: 'editImage',
     description:
-      'Edit an existing image using a text prompt via Google Gemini Nano Banana models. Provide a source image (local path or Drive file ID) and an edit instruction. Supports style transfer, background removal, modifications, and more.',
+      'Edit an existing image using a text prompt via Google Gemini. Provide a source image (local path or Drive file ID) and an edit instruction. Supports style transfer, background removal, modifications, and more.',
     inputSchema: {
       type: 'object',
       properties: {
         prompt: { type: 'string', description: 'Edit instruction (e.g., "Remove the background", "Make it look like a watercolor painting")' },
         sourceImagePath: { type: 'string', description: 'Local file path to the source image (provide this OR sourceDriveFileId)' },
-        sourceDriveFileId: { type: 'string', description: 'Google Drive file ID of the source image (provide this OR sourceImagePath)' },
+        sourceDriveFileId: { type: 'string', description: 'Google Drive file ID of the source image — requires OAuth setup (provide this OR sourceImagePath)' },
         model: {
           type: 'string',
           enum: [...MODELS],
@@ -314,7 +304,7 @@ export const toolDefinitions: ToolDefinition[] = [
         saveTo: {
           type: 'string',
           enum: [...SAVE_TARGETS],
-          description: 'Save to Google Drive or locally (default: drive)',
+          description: 'Save locally or to Google Drive (default: local). Drive requires OAuth setup.',
         },
         fileName: { type: 'string', description: 'Output file name (without extension)' },
         driveFolderId: {
@@ -323,7 +313,7 @@ export const toolDefinitions: ToolDefinition[] = [
         },
         localPath: {
           type: 'string',
-          description: 'Local directory to save output to — used when saveTo=local',
+          description: 'Local directory to save output to — used when saveTo=local (default: system temp dir)',
         },
       },
       required: ['prompt'],

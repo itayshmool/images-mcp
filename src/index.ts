@@ -8,7 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { google } from "googleapis";
 import type { drive_v3 } from "googleapis";
-import { authenticate, AuthServer, initializeOAuth2Client } from './auth.js';
+import { authenticate, createOAuth2Client, AuthServer } from './auth.js';
 import { fileURLToPath } from 'url';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
@@ -40,19 +40,17 @@ function log(message: string, data?: any) {
 }
 
 function getDrive(): drive_v3.Drive {
-  if (!authClient) throw new Error('Authentication required');
+  if (!authClient) throw new Error('Not authenticated');
   if (_drive && _lastAuthClient === authClient) return _drive;
   _drive = google.drive({ version: 'v3', auth: authClient });
   _lastAuthClient = authClient;
-  log('Drive service created');
   return _drive;
 }
 
 async function resolvePath(pathStr: string): Promise<string> {
   if (!pathStr || pathStr === '/') return 'root';
-
   const parts = pathStr.replace(/^\/+|\/+$/g, '').split('/');
-  let currentFolderId: string = 'root';
+  let currentFolderId = 'root';
 
   for (const part of parts) {
     if (!part) continue;
@@ -67,23 +65,16 @@ async function resolvePath(pathStr: string): Promise<string> {
 
     if (!response.data.files?.length) {
       const folder = await getDrive().files.create({
-        requestBody: {
-          name: part,
-          mimeType: FOLDER_MIME_TYPE,
-          parents: [currentFolderId],
-        },
+        requestBody: { name: part, mimeType: FOLDER_MIME_TYPE, parents: [currentFolderId] },
         fields: 'id',
         supportsAllDrives: true,
       });
-      if (!folder.data.id) {
-        throw new Error(`Failed to create intermediate folder: ${part}`);
-      }
+      if (!folder.data.id) throw new Error(`Failed to create folder: ${part}`);
       currentFolderId = folder.data.id;
     } else {
       currentFolderId = response.data.files[0].id!;
     }
   }
-
   return currentFolderId;
 }
 
@@ -94,30 +85,20 @@ async function resolveFolderId(input: string | undefined): Promise<string> {
 
 async function ensureAuthenticated() {
   if (authClient) return;
-
   if (authenticationPromise) {
-    log('Authentication already in progress, waiting...');
     authClient = await authenticationPromise;
     return;
   }
-
-  log('Initializing authentication');
   authenticationPromise = authenticate();
   try {
     authClient = await authenticationPromise;
-    log('Authentication complete');
   } finally {
     authenticationPromise = null;
   }
 }
 
 function buildToolContext(): ToolContext {
-  return {
-    authClient,
-    getDrive,
-    log,
-    resolveFolderId,
-  };
+  return { authClient, getDrive, log, resolveFolderId };
 }
 
 const server = new Server(
@@ -132,7 +113,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   await ensureAuthenticated();
   log('Handling tool request', { tool: request.params.name });
-
   const ctx = buildToolContext();
 
   try {
@@ -140,7 +120,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (result !== null) return result;
     return errorResponse("Tool not found");
   } catch (error) {
-    log('Error in tool request handler', { error: (error as Error).message });
+    log('Error', { error: (error as Error).message });
     return errorResponse((error as Error).message);
   }
 });
@@ -150,106 +130,68 @@ function showHelp(): void {
 Images MCP Server v${VERSION}
 
 Usage:
-  npx @itayshmool/images-mcp [command]
+  npx images-mcp [command]
 
 Commands:
-  auth     Run the authentication flow
+  auth     Sign in with Google (opens browser)
   start    Start the MCP server (default)
-  version  Show version information
-  help     Show this help message
+  version  Show version
+  help     Show this message
 
-Environment Variables:
-  GOOGLE_DRIVE_OAUTH_CREDENTIALS   Path to OAuth credentials file
-  GOOGLE_DRIVE_MCP_TOKEN_PATH      Path to store authentication tokens
-  GEMINI_API_KEY                   Gemini API key (alternative to OAuth)
+No API keys or cloud projects needed — just sign in with Google.
 `);
 }
 
-function showVersion(): void {
-  console.log(`Images MCP Server v${VERSION}`);
-}
-
 async function runAuthServer(): Promise<void> {
-  try {
-    const oauth2Client = await initializeOAuth2Client();
-    const authServerInstance = new AuthServer(oauth2Client);
-    const success = await authServerInstance.start(true);
+  const oauth2Client = createOAuth2Client();
+  const authServerInstance = new AuthServer(oauth2Client);
+  const success = await authServerInstance.start(true);
 
-    if (!success && !authServerInstance.authCompletedSuccessfully) {
-      console.error("Authentication failed.");
-      process.exit(1);
-    } else if (authServerInstance.authCompletedSuccessfully) {
-      console.log("Authentication successful.");
-      process.exit(0);
-    }
-
-    console.log("Authentication server started. Complete the authentication in your browser...");
-
-    const intervalId = setInterval(async () => {
-      if (authServerInstance.authCompletedSuccessfully) {
-        clearInterval(intervalId);
-        await authServerInstance.stop();
-        console.log("Authentication completed successfully!");
-        process.exit(0);
-      }
-    }, 1000);
-  } catch (error) {
-    console.error("Authentication failed:", error);
+  if (!success && !authServerInstance.authCompletedSuccessfully) {
+    console.error("Authentication failed.");
     process.exit(1);
   }
-}
-
-function parseCliArgs(): { command: string | undefined } {
-  const args = process.argv.slice(2);
-  let command: string | undefined;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === '--version' || arg === '-v' || arg === '--help' || arg === '-h') {
-      command = arg;
-      continue;
-    }
-    if (!command && !arg.startsWith('--')) {
-      command = arg;
-      continue;
-    }
+  if (authServerInstance.authCompletedSuccessfully) {
+    console.log("Already signed in.");
+    process.exit(0);
   }
 
-  return { command };
+  console.log("Complete the sign-in in your browser...");
+  const check = setInterval(async () => {
+    if (authServerInstance.authCompletedSuccessfully) {
+      clearInterval(check);
+      await authServerInstance.stop();
+      console.log("Signed in successfully!");
+      process.exit(0);
+    }
+  }, 1000);
 }
 
 async function main() {
-  const { command } = parseCliArgs();
+  const command = process.argv.slice(2).find(a => !a.startsWith('--')) ||
+    (['--version', '-v'].includes(process.argv[2]) ? 'version' :
+     ['--help', '-h'].includes(process.argv[2]) ? 'help' : undefined);
 
   switch (command) {
-    case "auth":
+    case 'auth':
       await runAuthServer();
       break;
-    case "start":
-    case undefined:
-      try {
-        console.error("Starting Images MCP server...");
-        const transport = new StdioServerTransport();
-        await server.connect(transport);
-        log('Server started successfully');
-
-        process.on("SIGINT", async () => { await server.close(); process.exit(0); });
-        process.on("SIGTERM", async () => { await server.close(); process.exit(0); });
-      } catch (error) {
-        console.error('Failed to start server:', error);
-        process.exit(1);
-      }
+    case 'version': case '--version': case '-v':
+      console.log(`Images MCP Server v${VERSION}`);
       break;
-    case "version":
-    case "--version":
-    case "-v":
-      showVersion();
-      break;
-    case "help":
-    case "--help":
-    case "-h":
+    case 'help': case '--help': case '-h':
       showHelp();
       break;
+    case 'start':
+    case undefined: {
+      console.error("Starting Images MCP server...");
+      const transport = new StdioServerTransport();
+      await server.connect(transport);
+      log('Server started');
+      process.on('SIGINT', async () => { await server.close(); process.exit(0); });
+      process.on('SIGTERM', async () => { await server.close(); process.exit(0); });
+      break;
+    }
     default:
       console.error(`Unknown command: ${command}`);
       showHelp();
